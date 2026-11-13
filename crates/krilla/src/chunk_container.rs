@@ -15,6 +15,7 @@ type DChunk = Deferred<Chunk>;
 /// Collects all chunks that we create while building
 /// the PDF and then writes them out in an orderly manner.
 pub(crate) struct ChunkContainer {
+    pub(crate) non_printing_background_layer: Option<Ref>,
     pub(crate) streams: StreamChunks,
     pub(crate) mixed: MixedChunks,
     pub(crate) metadata: Option<Metadata>,
@@ -60,6 +61,7 @@ pub(crate) struct NonStreamChunks {
 impl ChunkContainer {
     pub(crate) fn new(sc: &SerializeContext) -> Self {
         Self {
+            non_printing_background_layer: None,
             streams: StreamChunks {
                 fonts: vec![],
                 shading_functions: vec![],
@@ -224,6 +226,23 @@ impl ChunkContainer {
 
             if let Some(pt) = &self.non_stream.page_tree {
                 catalog.pages(remapper[&pt.0]);
+            }
+
+            if let Some(layer) = self.non_printing_background_layer {
+                let layer = remapper[&layer];
+                let mut properties = catalog.insert(Name(b"OCProperties")).dict();
+                properties.insert(Name(b"OCGs")).array().item(layer);
+                let mut config = properties.insert(Name(b"D")).dict();
+                config.pair(Name(b"BaseState"), Name(b"ON"));
+                config.insert(Name(b"ON")).array().item(layer);
+                config.insert(Name(b"Order")).array().item(layer);
+                let mut usage = config.insert(Name(b"AS")).array();
+                for event in [Name(b"View"), Name(b"Print")] {
+                    let mut application = usage.push().dict();
+                    application.pair(Name(b"Event"), event);
+                    application.insert(Name(b"OCGs")).array().item(layer);
+                    application.insert(Name(b"Category")).array().item(event);
+                }
             }
 
             if let Some(meta_ref) = meta_ref {

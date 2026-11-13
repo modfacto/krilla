@@ -22,6 +22,8 @@ pub type KrillaResult<T> = Result<T, KrillaError>;
 /// An error in krilla.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum KrillaError {
+    /// Non-printing backgrounds require PDF 1.5+ and are not supported in validated exports.
+    UnsupportedNonPrintingBackground,
     /// An error while attempting to embed a font.
     Font(Font, String),
     /// A list of validation errors. Can only occur if you set the `validator` in
@@ -59,6 +61,10 @@ pub enum KrillaError {
 impl Display for KrillaError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            KrillaError::UnsupportedNonPrintingBackground => write!(
+                f,
+                "non-printing backgrounds require PDF 1.5+ without PDF/A or PDF/UA validation"
+            ),
             KrillaError::Font(_, message) => write!(f, "failed to embed font: {message}"),
             KrillaError::Validation(errors) => {
                 let count = errors.len();

@@ -6,13 +6,15 @@ use std::ops::DerefMut;
 
 use pdf_writer::types::TabOrder;
 use pdf_writer::writers::NumberTree;
-use pdf_writer::{Chunk, Finish, Ref, TextStr};
+use pdf_writer::{Chunk, Content, Finish, Name, Ref, TextStr};
 
 use crate::chunk_container::ChunkContainer;
+use crate::color::rgb;
 use crate::configure::validate::VersionedFeature;
+use crate::configure::PdfVersion;
 use crate::configure::ValidationError;
 use crate::content::ContentBuilder;
-use crate::error::KrillaResult;
+use crate::error::{KrillaError, KrillaResult};
 use crate::geom::{Rect, Size, Transform};
 use crate::interactive::annotation::Annotation;
 use crate::interchange::tagging::{Identifier, PageTagIdentifier};
@@ -40,6 +42,7 @@ pub struct PageSettings {
     trim_box: Option<Rect>,
     /// The actual content boundaries
     art_box: Option<Rect>,
+    non_printing_background: Option<rgb::Color>,
 }
 
 impl PageSettings {
@@ -57,6 +60,16 @@ impl PageSettings {
     /// Returns `None` if either the width or the height is not > 0.
     pub fn from_wh(width: f32, height: f32) -> Option<Self> {
         Some(Self::new(Size::from_wh(width, height)?))
+    }
+
+    /// Paint a device-RGB background that is visible on screen but disabled for printing.
+    ///
+    /// The background covers the media box and is drawn before the page contents.
+    /// PDF viewers must honour optional-content print settings for this to take effect.
+    /// Requires PDF 1.5 or newer; PDF/A and PDF/UA validated exports are not supported.
+    pub fn with_non_printing_background(mut self, color: rgb::Color) -> Self {
+        self.non_printing_background = Some(color);
+        self
     }
 
     /// Change the media box.
@@ -174,6 +187,7 @@ impl Default for PageSettings {
             bleed_box: None,
             trim_box: None,
             art_box: None,
+            non_printing_background: None,
         }
     }
 }
@@ -380,11 +394,72 @@ impl InternalPage {
     }
 
     pub(crate) fn serialize(
-        self,
+        mut self,
         sc: &mut SerializeContext,
         chunk_container: &mut ChunkContainer,
         root_ref: Ref,
     ) -> KrillaResult<()> {
+        let background_ref = if let Some(color) = self.page_settings.non_printing_background {
+            if sc.serialize_settings().pdf_version() < PdfVersion::Pdf15
+                || !sc.serialize_settings().validators().is_empty()
+            {
+                return Err(KrillaError::UnsupportedNonPrintingBackground);
+            }
+            let layer = if let Some(layer) = chunk_container.non_printing_background_layer {
+                layer
+            } else {
+                let layer = sc.new_ref();
+                let mut group = chunk_container.non_stream.pages.indirect(layer).dict();
+                group.pair(Name(b"Type"), Name(b"OCG"));
+                group.pair(Name(b"Name"), TextStr("Non-printing background"));
+                let mut usage = group.insert(Name(b"Usage")).dict();
+                usage
+                    .insert(Name(b"View"))
+                    .dict()
+                    .pair(Name(b"ViewState"), Name(b"ON"));
+                usage
+                    .insert(Name(b"Print"))
+                    .dict()
+                    .pair(Name(b"PrintState"), Name(b"OFF"));
+                usage.finish();
+                group.finish();
+                chunk_container.non_printing_background_layer = Some(layer);
+                layer
+            };
+            self.stream_resources.non_printing_background_layer = Some(layer);
+            let media = self
+                .page_settings
+                .media_box()
+                .unwrap_or(self.bbox)
+                .transform(page_root_transform(
+                    self.page_settings.surface_size().height(),
+                ))
+                .unwrap();
+            let mut content = Content::new();
+            content.save_state();
+            content
+                .begin_marked_content_with_properties(Name(b"OC"))
+                .properties_named(Name(b"NonPrintingBackground"));
+            content.set_fill_rgb(
+                f32::from(color.red()) / 255.0,
+                f32::from(color.green()) / 255.0,
+                f32::from(color.blue()) / 255.0,
+            );
+            content
+                .rect(media.left(), media.top(), media.width(), media.height())
+                .fill_nonzero();
+            content.end_marked_content().restore_state();
+            let background = sc.new_ref();
+            let bytes = content.finish();
+            chunk_container
+                .non_stream
+                .pages
+                .stream(background, &bytes)
+                .finish();
+            Some(background)
+        } else {
+            None
+        };
         let mut annotation_refs = vec![];
 
         if !self.annotations.is_empty() {
@@ -486,7 +561,11 @@ impl InternalPage {
         }
 
         page.parent(sc.page_tree_ref());
-        page.contents(self.stream_ref);
+        if let Some(background) = background_ref {
+            page.contents_array([background, self.stream_ref]);
+        } else {
+            page.contents(self.stream_ref);
+        }
 
         if !annotation_refs.is_empty() {
             page.annotations(annotation_refs.iter().map(|(r, _)| *r));

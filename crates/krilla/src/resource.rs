@@ -209,12 +209,14 @@ impl ResourceDictionaryBuilder {
             x_objects: self.x_objects.into_resource_list(),
             shadings: self.shadings.into_resource_list(),
             fonts: self.fonts.into_resource_list(),
+            non_printing_background_layer: None,
         }
     }
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub(crate) struct ResourceDictionary {
+    pub(crate) non_printing_background_layer: Option<Ref>,
     pub(crate) color_spaces: ResourceList<ColorSpace>,
     pub(crate) ext_g_states: ResourceList<ExtGState>,
     pub(crate) patterns: ResourceList<Pattern>,
@@ -226,6 +228,7 @@ pub(crate) struct ResourceDictionary {
 impl Default for ResourceDictionary {
     fn default() -> Self {
         Self {
+            non_printing_background_layer: None,
             color_spaces: ResourceList::empty(),
             ext_g_states: ResourceList::empty(),
             patterns: ResourceList::empty(),
@@ -253,7 +256,8 @@ impl ResourceDictionary {
             || self.patterns.len() > 0
             || self.x_objects.len() > 0
             || self.shadings.len() > 0
-            || self.fonts.len() > 0;
+            || self.fonts.len() > 0
+            || self.non_printing_background_layer.is_some();
 
         if !write_proc_sets && !has_resource_entries {
             // `Resources` dictionary is mandatory (or rather, it's mandatory if
@@ -282,6 +286,12 @@ impl ResourceDictionary {
         write_resource_type::<XObject>(&mut resources, &self.x_objects);
         write_resource_type::<Shading>(&mut resources, &self.shadings);
         write_resource_type::<Font>(&mut resources, &self.fonts);
+        if let Some(layer) = self.non_printing_background_layer {
+            resources
+                .insert(Name(b"Properties"))
+                .dict()
+                .pair(Name(b"NonPrintingBackground"), layer);
+        }
         parent.set_resources(resources_ref);
     }
 }
